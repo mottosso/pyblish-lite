@@ -14,7 +14,7 @@ States:
     |      |<-------------------'
     |      |
     |      |                   _____________
-    |      |     validate     |             |    reset     # TODO
+    |      |     validate     |             |    reset
     |      |----------------->| In-progress |-----------.
     |      |                  |_____________|           '
     |      |<-------------------------------------------'
@@ -42,23 +42,33 @@ Todo:
 
 from Qt import QtCore, QtWidgets, QtGui
 
+import pyblish.api
+import pyblish.engine
+
 from . import model, view, util, delegate
 from .awesome import tags as awesome
 
 
+def defer(self, delay, func):
+    return util.defer(delay, func)
+
+
 class Window(QtWidgets.QDialog):
-    def __init__(self, controller, parent=None):
+    def __init__(self, parent=None):
         super(Window, self).__init__(parent)
         icon = QtGui.QIcon(util.get_asset("img", "logo-extrasmall.png"))
         self.setWindowFlags(self.windowFlags() |
-                            QtCore.Qt.WindowTitleHint |
                             QtCore.Qt.WindowMaximizeButtonHint |
                             QtCore.Qt.WindowMinimizeButtonHint |
                             QtCore.Qt.WindowCloseButtonHint)
         self.setWindowTitle("Pyblish")
         self.setWindowIcon(icon)
 
-        self.controller = controller
+        self.engine = pyblish.engine.create(
+            signal=QtCore.Signal,
+            base=QtCore.QObject,
+            defer=defer
+        )
 
         """General layout
          __________________       _____________________
@@ -484,26 +494,31 @@ class Window(QtWidgets.QDialog):
         terminal_tab.toggled.connect(
             lambda: self.on_tab_changed("terminal"))
 
-        controller.was_reset.connect(self.on_was_reset)
-        controller.was_validated.connect(self.on_was_validated)
-        controller.was_published.connect(self.on_was_published)
-        controller.was_acted.connect(self.on_was_acted)
-        controller.finished.connect(self.on_finished)
+        pyblish.api.register_callback("was_reset", self._temp)
 
-        # Discovery happens synchronously during reset, that's
-        # why it's important that this connection is triggered
-        # right away.
-        controller.was_discovered.connect(self.on_was_discovered,
-                                          QtCore.Qt.DirectConnection)
+        pyblish_signals = {
+            "was_collected": self.on_was_collected,
+            "was_validated": self.on_was_validated,
+            "was_published": self.on_was_published,
+            "was_acted": self.on_was_acted,
+            "finished": self.on_finished,
 
-        # This is called synchronously on each process
-        controller.was_processed.connect(self.on_was_processed,
-                                         QtCore.Qt.DirectConnection)
+            # Discovery happens synchronously during reset, that's
+            # why it's important that this connection is triggered
+            # right away.
+            "was_discovered": self.on_was_discovered,
 
-        # NOTE: Listeners to this signal are run in the main thread
-        controller.about_to_process.connect(self.on_about_to_process,
-                                            QtCore.Qt.DirectConnection)
+            # This is called synchronously on each process
+            "was_processed": self.on_was_processed,
 
+            # NOTE: Listeners to this signal are run in the main thread
+            "about_to_process": self.on_about_to_process,
+        }
+
+        for name, handler in pyblish_signals.items():
+            getattr(self.engine, name).connect(handler)
+
+        # User signals
         artist_view.toggled.connect(self.on_item_toggled)
         left_view.toggled.connect(self.on_item_toggled)
         right_view.toggled.connect(self.on_item_toggled)
@@ -669,7 +684,7 @@ class Window(QtWidgets.QDialog):
 
     def on_stop_clicked(self):
         self.info("Stopping..")
-        self.controller.is_running = False
+        self.engine.stop()
 
     def on_comment_entered(self):
         """The user has typed a comment"""
@@ -677,7 +692,7 @@ class Window(QtWidgets.QDialog):
         comment = text_edit.text()
 
         # Store within context
-        context = self.controller.context
+        context = self.engine.context
         context.data["comment"] = comment
 
         placeholder = self.findChild(QtWidgets.QLabel, "CommentPlaceholder")
@@ -732,13 +747,13 @@ class Window(QtWidgets.QDialog):
     def on_was_discovered(self):
         models = self.data["models"]
 
-        for Plugin in self.controller.plugins:
+        for Plugin in self.engine.plugins:
             models["plugins"].append(Plugin)
 
-    def on_was_reset(self):
+    def on_was_collected(self):
         models = self.data["models"]
 
-        for instance in self.controller.context:
+        for instance in self.engine.context:
             models["instances"].append(instance)
 
         self.info("Finishing up reset..")
@@ -756,7 +771,7 @@ class Window(QtWidgets.QDialog):
         # This allows users to inject a comment from elsewhere,
         # or to perhaps provide a placeholder comment/template
         # for artists to fill in.
-        comment = self.controller.context.data.get("comment")
+        comment = self.engine.context.data.get("comment")
 
         comment_box = self.findChild(QtWidgets.QWidget, "CommentBox")
         comment_box.setText(comment or None)
@@ -765,7 +780,7 @@ class Window(QtWidgets.QDialog):
         # Refresh tab
         self.on_tab_changed(self.data["tabs"]["current"])
 
-        self.controller.current_error = None
+        self.engine.current_error = None
         util.defer(500, self.on_finished)
 
     def on_was_validated(self):
@@ -820,9 +835,9 @@ class Window(QtWidgets.QDialog):
 
     def on_finished(self):
         """Finished signal handler"""
-        self.controller.is_running = False
+        self.engine.stop()
 
-        error = self.controller.current_error
+        error = self.engine.current_error
         if error is not None:
             self.info("Stopped due to error(s), see Terminal.")
         else:
@@ -852,7 +867,8 @@ class Window(QtWidgets.QDialog):
         comment_box = self.findChild(QtWidgets.QWidget, "CommentBox")
         comment_box.hide()
 
-        util.defer(500, self.controller.reset)
+        self.engine.reset()
+        util.defer(500, self.engine.collect)
 
     def validate(self):
         self.info("Preparing validate..")
@@ -861,7 +877,7 @@ class Window(QtWidgets.QDialog):
             button.hide()
 
         self.data["buttons"]["stop"].show()
-        util.defer(5, self.controller.validate)
+        util.defer(5, self.engine.validate)
 
     def publish(self):
         self.info("Preparing publish..")
@@ -870,7 +886,7 @@ class Window(QtWidgets.QDialog):
             button.hide()
 
         self.data["buttons"]["stop"].show()
-        util.defer(5, self.controller.publish)
+        util.defer(5, self.engine.publish)
 
     def act(self, plugin, action):
         self.info("Preparing action..")
@@ -879,9 +895,8 @@ class Window(QtWidgets.QDialog):
             button.hide()
 
         self.data["buttons"]["stop"].show()
-        self.controller.is_running = True
 
-        util.defer(100, lambda: self.controller.act(plugin, action))
+        util.defer(100, lambda: self.engine.act(plugin, action))
         self.info("Action prepared.")
 
     def closeEvent(self, event):
@@ -910,7 +925,7 @@ class Window(QtWidgets.QDialog):
                 del(item)
 
             self.info("Cleaning up controller..")
-            self.controller.cleanup()
+            self.engine.cleanup()
 
             self.info("All clean!")
             self.info("Good bye")
@@ -923,9 +938,9 @@ class Window(QtWidgets.QDialog):
                           "Please tell someone and try again.")
             self.show()
 
-        if self.controller.is_running:
+        if self.engine.is_running:
             self.info("..as soon as processing is finished..")
-            self.controller.is_running = False
+            self.engine.is_running = False
             self.finished.connect(self.close)
             util.defer(2000, on_problem)
             return event.ignore()
@@ -938,9 +953,9 @@ class Window(QtWidgets.QDialog):
     def reject(self):
         """Handle ESC key"""
 
-        if self.controller.is_running:
+        if self.engine.is_running:
             self.info("Stopping..")
-            self.controller.is_running = False
+            self.engine.is_running = False
 
     # -------------------------------------------------------------------------
     #

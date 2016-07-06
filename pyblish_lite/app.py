@@ -2,10 +2,9 @@ import os
 import sys
 import contextlib
 
-from .vendor import Qt
-from Qt import QtWidgets, QtGui
+from .vendor.Qt import QtWidgets, QtGui
 
-from . import control, util, window, compat
+from . import util, window, compat
 
 
 @contextlib.contextmanager
@@ -52,9 +51,8 @@ def show(parent=None):
 
         install_fonts()
 
-        ctrl = control.Controller()
+        win = window.Window(parent)
 
-        win = window.Window(ctrl, parent)
         win.resize(430, 600)
         win.show()
 
